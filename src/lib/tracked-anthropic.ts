@@ -88,9 +88,10 @@ export async function getUsageSummary(userId: string): Promise<UsageSummary> {
   const tier = isLocal ? 'local' : (user?.tier ?? 'free');
 
   // Aggregate usage for current month
-  const startOfMonth = new Date();
-  startOfMonth.setDate(1);
-  startOfMonth.setHours(0, 0, 0, 0);
+  const d = new Date();
+  d.setDate(1);
+  d.setHours(0, 0, 0, 0);
+  const startOfMonth = d.toISOString();
 
   const [usage] = await db
     .select({

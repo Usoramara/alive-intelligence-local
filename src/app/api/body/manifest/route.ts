@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getBodyRegistry, initBodyHal } from '../../../../../openclaw/extensions/body-hal';
+import { getBodyRegistry, initBodyHal } from '@/lib/body-hal-stub';
 
 export async function GET(): Promise<NextResponse> {
   await initBodyHal();

@@ -69,7 +69,7 @@ export async function GET(request: Request) {
       .filter((m) => m.emotionShift)
       .map((m) => ({
         emotion: m.emotionShift,
-        time: m.createdAt.toISOString(),
+        time: m.createdAt,
       }));
 
     // Real engine data from registry (falls back to state-derived heuristics)
@@ -101,7 +101,7 @@ export async function GET(request: Request) {
       stateDescription: stateToDescription(selfState),
       recentEmotions,
       memoryCount: memoryCountResult[0]?.count ?? 0,
-      lastInteraction: recentMessages[0]?.createdAt?.toISOString() ?? null,
+      lastInteraction: recentMessages[0]?.createdAt ?? null,
       engineStatuses,
       recentSignals: recentSignalEntries,
       innerLifeStream: innerLifeEntries,

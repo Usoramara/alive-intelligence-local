@@ -6,11 +6,7 @@ import { sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { ENGINE_ZONES, SIGNAL_PATHS } from '@/core/constants';
 import type { Zone } from '@/core/constants';
-import {
-  getBodyRegistry,
-  getTaskManager,
-  initBodyHal,
-} from '../../../../../openclaw/extensions/body-hal';
+import { getBodyRegistry, getTaskManager, initBodyHal } from '@/lib/body-hal-stub';
 
 function parseIdentity(content: string) {
   const get = (key: string) => {
@@ -116,7 +112,7 @@ export async function GET() {
   let database = { connected: false };
   try {
     const db = getDb();
-    await db.execute(sql`SELECT 1`);
+    db.get(sql`SELECT 1`);
     database = { connected: true };
   } catch {
     database = { connected: false };

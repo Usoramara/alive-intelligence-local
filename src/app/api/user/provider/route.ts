@@ -5,9 +5,9 @@ export async function GET() {
   const mode = getProviderMode();
   const provider = getProvider();
 
-  let ollamaHealthy = false;
+  let ollamaStatus = { connected: false, models: [] as string[] };
   if (mode === 'local') {
-    ollamaHealthy = await checkOllamaHealth();
+    ollamaStatus = await checkOllamaHealth();
   }
 
   return NextResponse.json({
@@ -15,7 +15,7 @@ export async function GET() {
     providerName: provider.name,
     supportsVision: provider.supportsVision(),
     supportsToolUse: provider.supportsToolUse(),
-    ollamaHealthy,
+    ollamaStatus,
   });
 }
 
@@ -34,9 +34,9 @@ export async function PUT(request: Request) {
     setProviderMode(mode);
 
     const provider = getProvider();
-    let ollamaHealthy = false;
+    let ollamaStatus = { connected: false, models: [] as string[] };
     if (mode === 'local') {
-      ollamaHealthy = await checkOllamaHealth();
+      ollamaStatus = await checkOllamaHealth();
     }
 
     return NextResponse.json({
@@ -44,7 +44,7 @@ export async function PUT(request: Request) {
       providerName: provider.name,
       supportsVision: provider.supportsVision(),
       supportsToolUse: provider.supportsToolUse(),
-      ollamaHealthy,
+      ollamaStatus,
     });
   } catch {
     return NextResponse.json(

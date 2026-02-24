@@ -33,7 +33,7 @@ export async function getOrCreateVoiceSession(userId: string): Promise<string> {
   // 2. Cold start — try to recover from DB
   try {
     const db = getDb();
-    const cutoff = new Date(Date.now() - SESSION_TIMEOUT_MS);
+    const cutoff = new Date(Date.now() - SESSION_TIMEOUT_MS).toISOString();
     const [recent] = await db
       .select({ id: conversations.id, updatedAt: conversations.updatedAt })
       .from(conversations)

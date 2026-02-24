@@ -1,6 +1,6 @@
 import { createApiHandler } from '@/lib/api-handler';
 import { bodyExecuteSchema } from '@/lib/schemas';
-import { getTaskManager, initBodyHal } from '../../../../../openclaw/extensions/body-hal';
+import { getTaskManager, initBodyHal } from '@/lib/body-hal-stub';
 import type { BodyIntent } from '@/core/hal/types';
 
 export const POST = createApiHandler({
