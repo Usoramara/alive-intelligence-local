@@ -102,7 +102,7 @@ async function flushToDB(key: string, messages: HistoryMessage[]): Promise<void>
       })
       .onConflictDoUpdate({
         target: [channelConversations.userId, channelConversations.channelType, channelConversations.channelUserId],
-        set: { messages: JSON.stringify(messages), updatedAt: new Date() },
+        set: { messages: JSON.stringify(messages), updatedAt: new Date().toISOString() },
       });
   } catch (err) {
     console.error('[history-store] flush error:', err);

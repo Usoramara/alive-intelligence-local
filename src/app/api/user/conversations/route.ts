@@ -1,14 +1,11 @@
 import { NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
+import { LOCAL_USER_ID } from '@/lib/local-user';
 import { getDb } from '@/db';
 import { conversations } from '@/db/schema';
 import { eq, desc } from 'drizzle-orm';
 
 export async function GET(): Promise<NextResponse> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const userId = LOCAL_USER_ID;
 
   const db = getDb();
   const results = await db
@@ -27,10 +24,7 @@ export async function GET(): Promise<NextResponse> {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const userId = LOCAL_USER_ID;
 
   const body = await request.json();
   const db = getDb();

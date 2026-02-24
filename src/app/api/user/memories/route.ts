@@ -1,12 +1,9 @@
 import { NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
+import { LOCAL_USER_ID } from '@/lib/local-user';
 import { searchMemories, saveMemoryWithEmbedding, getRecentMemories } from '@/lib/memory/manager';
 
 export async function GET(request: Request): Promise<NextResponse> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const userId = LOCAL_USER_ID;
 
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
@@ -22,10 +19,7 @@ export async function GET(request: Request): Promise<NextResponse> {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const userId = LOCAL_USER_ID;
 
   const body = await request.json();
   const { type, content, significance, tags } = body;

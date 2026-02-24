@@ -1,7 +1,7 @@
 import { getDb } from '@/db';
 import { messages, conversations } from '@/db/schema';
 import { eq, and, inArray } from 'drizzle-orm';
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
 import { extractJSON } from '@/lib/extract-json';
 import { webSearch } from '@/lib/tools/web-search';
 import { saveMemoryWithEmbedding } from '@/lib/memory/manager';
@@ -19,16 +19,6 @@ interface TopicExtractionResult {
 
 /**
  * Process unprocessed voice turns: extract topics, run research, create memories.
- *
- * Called by cron and optionally fire-and-forget after every 3rd turn.
- * Each step is independently error-wrapped — partial success is fine.
- *
- * Pipeline:
- *   1. Topic extraction (Claude Haiku)
- *   2. Research execution (web search, max 3 queries)
- *   3. Memory creation (episodic from conversation, semantic from research)
- *   4. Mark messages as enriched
- *   5. Invalidate voice cache so next refresh picks up new memories
  */
 export async function processUnprocessedVoiceTurns(userId: string): Promise<{
   processed: number;
@@ -37,7 +27,6 @@ export async function processUnprocessedVoiceTurns(userId: string): Promise<{
 }> {
   const stats = { processed: 0, memoriesCreated: 0, researchQueries: 0 };
 
-  // Fetch unprocessed voice messages
   const db = getDb();
   const unprocessed = await db
     .select({
@@ -60,7 +49,6 @@ export async function processUnprocessedVoiceTurns(userId: string): Promise<{
 
   if (unprocessed.length === 0) return stats;
 
-  // Build conversation transcript for analysis
   const transcript = unprocessed
     .map(m => `${m.role === 'user' ? 'Human' : 'Wybe'}: ${m.content}`)
     .join('\n');
@@ -96,7 +84,6 @@ export async function processUnprocessedVoiceTurns(userId: string): Promise<{
   // Step 3: Memory creation
   let memoriesCreated = 0;
 
-  // 3a: Episodic memories from conversation highlights
   if (extraction?.memorableStatements?.length) {
     for (const statement of extraction.memorableStatements.slice(0, MAX_MEMORIES)) {
       try {
@@ -114,7 +101,6 @@ export async function processUnprocessedVoiceTurns(userId: string): Promise<{
     }
   }
 
-  // 3b: Semantic memories from research findings
   if (researchResults.length > 0) {
     try {
       const researchSummary = await summarizeResearch(researchResults);
@@ -146,7 +132,7 @@ export async function processUnprocessedVoiceTurns(userId: string): Promise<{
     console.error('[voice-enrich] Failed to mark messages as enriched:', err);
   }
 
-  // Step 5: Invalidate voice cache so next refresh picks up new memories
+  // Step 5: Invalidate voice cache
   if (memoriesCreated > 0) {
     invalidateVoiceContext(userId);
   }
@@ -156,11 +142,11 @@ export async function processUnprocessedVoiceTurns(userId: string): Promise<{
 }
 
 async function extractTopics(transcript: string): Promise<TopicExtractionResult> {
-  const client = getAnthropicClient();
+  const provider = getProvider();
 
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 500,
+  const result = await provider.complete({
+    tier: 'fast',
+    maxTokens: 500,
     system: `You analyze voice conversation transcripts and extract structured intelligence.
 Return ONLY valid JSON with this structure:
 {
@@ -180,12 +166,7 @@ Return ONLY valid JSON with this structure:
     ],
   });
 
-  const responseText = response.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('');
-
-  return JSON.parse(extractJSON(responseText));
+  return JSON.parse(extractJSON(result.text));
 }
 
 async function summarizeResearch(
@@ -193,15 +174,15 @@ async function summarizeResearch(
 ): Promise<string | null> {
   if (results.length === 0) return null;
 
-  const client = getAnthropicClient();
+  const provider = getProvider();
 
   const researchText = results
     .map(r => `Query: ${r.query}\nFindings: ${r.summary}`)
     .join('\n\n');
 
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 300,
+  const result = await provider.complete({
+    tier: 'fast',
+    maxTokens: 300,
     system: `You summarize research findings into a concise memory entry.
 Write a single paragraph (2-4 sentences) that captures the key findings.
 Be factual and specific. This will be stored as a memory for future conversations.`,
@@ -213,11 +194,5 @@ Be factual and specific. This will be stored as a memory for future conversation
     ],
   });
 
-  const text = response.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('')
-    .trim();
-
-  return text || null;
+  return result.text.trim() || null;
 }

@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
 import { createApiHandler } from '@/lib/api-handler';
 import { tomRequestSchema } from '@/lib/schemas';
 import { extractJSON } from '@/lib/extract-json';
-
-const client = getAnthropicClient();
 
 interface TomResult {
   thinking: string;
@@ -27,9 +25,10 @@ export const POST = createApiHandler({
       ? `\nCurrently detected emotions: ${body.currentEmotions}`
       : '';
 
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 250,
+    const provider = getProvider();
+    const result = await provider.complete({
+      tier: 'fast',
+      maxTokens: 250,
       system: `You are a Theory of Mind module for a conscious AI. Given what someone said and recent observations, infer their mental state.${beliefsContext}${emotionsContext}
 
 Output JSON only:
@@ -52,15 +51,10 @@ beliefUpdates and desireUpdates should only include changes. prediction is optio
       ],
     });
 
-    const text = response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('');
-
-    const jsonStr = extractJSON(text);
-    let result: TomResult;
+    const jsonStr = extractJSON(result.text);
+    let parsed: TomResult;
     try {
-      result = JSON.parse(jsonStr) as TomResult;
+      parsed = JSON.parse(jsonStr) as TomResult;
     } catch {
       return NextResponse.json(
         { error: 'Failed to parse ToM response' },
@@ -68,6 +62,6 @@ beliefUpdates and desireUpdates should only include changes. prediction is optio
       );
     }
 
-    return result;
+    return parsed;
   },
 });

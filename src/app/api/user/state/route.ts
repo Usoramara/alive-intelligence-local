@@ -1,14 +1,11 @@
 import { NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
+import { LOCAL_USER_ID } from '@/lib/local-user';
 import { getDb } from '@/db';
 import { cognitiveStates } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 
 export async function GET(): Promise<NextResponse> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const userId = LOCAL_USER_ID;
 
   const db = getDb();
   const [state] = await db
@@ -17,7 +14,6 @@ export async function GET(): Promise<NextResponse> {
     .where(eq(cognitiveStates.userId, userId));
 
   if (!state) {
-    // Return defaults
     return NextResponse.json({
       valence: 0.6,
       arousal: 0.3,
@@ -39,10 +35,7 @@ export async function GET(): Promise<NextResponse> {
 }
 
 export async function PUT(request: Request): Promise<NextResponse> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const userId = LOCAL_USER_ID;
 
   const body = await request.json();
   const db = getDb();
@@ -67,7 +60,7 @@ export async function PUT(request: Request): Promise<NextResponse> {
         energy: body.energy,
         social: body.social,
         curiosity: body.curiosity,
-        updatedAt: new Date(),
+        updatedAt: new Date().toISOString(),
       },
     });
 

@@ -3,11 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { UserButton } from '@clerk/nextjs';
-
-const hasClerkKeys =
-  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY?.startsWith('pk_') &&
-  !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY?.includes('placeholder');
+import { ProviderToggle } from '@/components/provider-toggle';
 
 interface Conversation {
   id: string;
@@ -55,7 +51,7 @@ export default function AppLayout({
             <Link href="/" className="text-sm font-mono text-white/70 hover:text-white/90">
               Wybe OS
             </Link>
-            {hasClerkKeys && <UserButton afterSignOutUrl="/" />}
+            <span className="text-xs font-mono text-white/30">local</span>
           </div>
 
           {/* New conversation button */}
@@ -90,6 +86,11 @@ export default function AppLayout({
               </p>
             )}
           </nav>
+
+          {/* Provider toggle */}
+          <div className="border-t border-white/5">
+            <ProviderToggle />
+          </div>
 
           {/* Bottom links */}
           <div className="p-2 border-t border-white/5">

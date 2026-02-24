@@ -1,7 +1,7 @@
-import type Anthropic from '@anthropic-ai/sdk';
+import type { ToolDefinition as ProviderToolDefinition } from '@/lib/llm/provider';
 import { discoverOpenClawTools, openClawToolsAsDefinitions } from '@/lib/openclaw-tool-bridge';
 
-export type ToolDefinition = Anthropic.Tool;
+export type ToolDefinition = ProviderToolDefinition;
 
 /**
  * Get the full tool registry: core Wybe tools + discovered OpenClaw tools.

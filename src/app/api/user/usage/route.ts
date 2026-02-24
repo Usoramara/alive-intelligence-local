@@ -1,18 +1,14 @@
 import { NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
+import { LOCAL_USER_ID } from '@/lib/local-user';
 import { getUsageSummary } from '@/lib/tracked-anthropic';
 
 export async function GET(): Promise<NextResponse> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const userId = LOCAL_USER_ID;
 
   try {
     const summary = await getUsageSummary(userId);
     return NextResponse.json(summary);
   } catch {
-    // Database not available yet — return placeholder
     return NextResponse.json({
       inputTokens: 0,
       outputTokens: 0,

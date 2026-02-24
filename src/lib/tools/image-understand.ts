@@ -1,6 +1,7 @@
-// Image understanding tool using Claude Vision
+// Image understanding tool — uses vision-capable provider
 
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
+import type { ContentBlock } from '@/lib/llm/provider';
 
 export interface ImageUnderstandOutput {
   description: string;
@@ -11,60 +12,61 @@ export async function understandImage(params: {
   url: string;
   question?: string;
 }): Promise<ImageUnderstandOutput> {
-  const client = getAnthropicClient();
+  const provider = getProvider();
 
   const prompt = params.question
     ? `Look at this image and answer: ${params.question}`
     : 'Describe this image in detail. Include what you see, any text, colors, composition, and context.';
 
-  // Determine media type from URL
+  // Vision requires special handling — local models may not support it
+  if (!provider.supportsVision()) {
+    return {
+      description: 'Vision is not available with the current model. To use image understanding, switch to cloud mode or install a vision-capable model (e.g., llava:13b).',
+      model: 'none',
+    };
+  }
+
+  // Detect media type from URL
   const urlLower = params.url.toLowerCase();
-  let mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' = 'image/jpeg';
+  let mediaType = 'image/jpeg';
   if (urlLower.includes('.png')) mediaType = 'image/png';
   else if (urlLower.includes('.gif')) mediaType = 'image/gif';
   else if (urlLower.includes('.webp')) mediaType = 'image/webp';
 
-  // Check if it's a data URL (base64) or a remote URL
   const isBase64 = params.url.startsWith('data:');
 
-  const imageContent = isBase64
+  // Build image content block
+  const imageBlock: ContentBlock = isBase64
     ? {
-        type: 'image' as const,
+        type: 'image',
         source: {
-          type: 'base64' as const,
+          type: 'base64',
           media_type: mediaType,
           data: params.url.split(',')[1] ?? params.url,
         },
       }
     : {
-        type: 'image' as const,
+        type: 'image',
         source: {
-          type: 'url' as const,
+          type: 'url',
           url: params.url,
         },
       };
 
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
+  const result = await provider.complete({
+    tier: 'smart',
+    maxTokens: 1024,
+    system: 'You are a visual analysis system. Describe images in detail.',
     messages: [
       {
         role: 'user',
         content: [
-          imageContent,
+          imageBlock,
           { type: 'text', text: prompt },
         ],
       },
     ],
   });
 
-  const text = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => (block as { type: 'text'; text: string }).text)
-    .join('\n');
-
-  return {
-    description: text,
-    model: 'claude-sonnet-4-20250514',
-  };
+  return { description: result.text, model: provider.name };
 }

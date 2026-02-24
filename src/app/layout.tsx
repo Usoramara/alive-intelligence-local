@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Geist_Mono } from "next/font/google";
-import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 
 const geistMono = Geist_Mono({
@@ -8,14 +7,9 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-// Only use Clerk when real keys are configured
-const hasClerkKeys =
-  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY?.startsWith('pk_') &&
-  !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY?.includes('placeholder');
-
 export const metadata: Metadata = {
   title: "Wybe OS",
-  description: "Wybe OS — cognitive architecture, running in the browser",
+  description: "Wybe OS — cognitive architecture, running locally",
 };
 
 export default function RootLayout({
@@ -23,15 +17,11 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const content = (
+  return (
     <html lang="en" className="dark">
       <body className={`${geistMono.variable} antialiased`}>
         {children}
       </body>
     </html>
   );
-
-  if (!hasClerkKeys) return content;
-
-  return <ClerkProvider>{content}</ClerkProvider>;
 }

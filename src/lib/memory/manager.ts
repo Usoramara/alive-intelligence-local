@@ -1,6 +1,6 @@
 import { getDb } from '@/db';
 import { memories } from '@/db/schema';
-import { eq, desc, sql, and } from 'drizzle-orm';
+import { eq, desc } from 'drizzle-orm';
 import { embed } from './embeddings';
 
 export interface MemoryInput {
@@ -22,27 +22,46 @@ export interface MemoryResult {
 }
 
 /**
+ * Cosine similarity between two vectors.
+ */
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dotProduct / denom;
+}
+
+/**
  * Save a memory with its vector embedding.
+ * Embedding is stored as JSON text in SQLite.
  */
 export async function saveMemoryWithEmbedding(input: MemoryInput): Promise<string> {
   const db = getDb();
-  const embedding = await embed(input.content);
+  const embeddingVec = await embed(input.content);
 
   const [row] = await db.insert(memories).values({
     userId: input.userId,
     type: input.type,
     content: input.content,
     significance: input.significance,
-    tags: input.tags ?? [],
-    embedding,
+    tags: JSON.stringify(input.tags ?? []),
+    embedding: JSON.stringify(embeddingVec),
   }).returning({ id: memories.id });
 
   return row.id;
 }
 
 /**
- * Semantic search using pgvector cosine similarity.
- * Returns memories ranked by similarity to the query.
+ * Semantic search using cosine similarity computed in JavaScript.
+ * Loads all user memories with embeddings, computes similarity, and ranks.
+ * Efficient enough for single-user local use (<10k memories).
  */
 export async function searchMemories(
   userId: string,
@@ -53,10 +72,8 @@ export async function searchMemories(
   const db = getDb();
   const queryEmbedding = await embed(query);
 
-  // pgvector cosine distance: 1 - (a <=> b) = similarity
-  const similarity = sql<number>`1 - (${memories.embedding} <=> ${JSON.stringify(queryEmbedding)}::vector)`;
-
-  const results = await db
+  // Fetch all memories with embeddings for this user
+  const allMemories = await db
     .select({
       id: memories.id,
       type: memories.type,
@@ -64,19 +81,32 @@ export async function searchMemories(
       significance: memories.significance,
       tags: memories.tags,
       createdAt: memories.createdAt,
-      similarity,
+      embedding: memories.embedding,
     })
     .from(memories)
-    .where(
-      and(
-        eq(memories.userId, userId),
-        sql`1 - (${memories.embedding} <=> ${JSON.stringify(queryEmbedding)}::vector) > ${minSimilarity}`,
-      ),
-    )
-    .orderBy(sql`${memories.embedding} <=> ${JSON.stringify(queryEmbedding)}::vector`)
-    .limit(limit);
+    .where(eq(memories.userId, userId));
 
-  return results;
+  // Compute cosine similarity for each memory
+  const scored = allMemories
+    .filter(m => m.embedding) // Only memories with embeddings
+    .map(m => {
+      const embeddingVec = JSON.parse(m.embedding!) as number[];
+      const similarity = cosineSimilarity(queryEmbedding, embeddingVec);
+      return {
+        id: m.id,
+        type: m.type,
+        content: m.content,
+        significance: m.significance,
+        tags: m.tags ? (JSON.parse(m.tags) as string[]) : null,
+        createdAt: new Date(m.createdAt),
+        similarity,
+      };
+    })
+    .filter(m => m.similarity >= minSimilarity)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, limit);
+
+  return scored;
 }
 
 /**
@@ -88,7 +118,7 @@ export async function getRecentMemories(
 ): Promise<MemoryResult[]> {
   const db = getDb();
 
-  return db
+  const results = await db
     .select({
       id: memories.id,
       type: memories.type,
@@ -101,4 +131,10 @@ export async function getRecentMemories(
     .where(eq(memories.userId, userId))
     .orderBy(desc(memories.createdAt))
     .limit(limit);
+
+  return results.map(m => ({
+    ...m,
+    tags: m.tags ? (JSON.parse(m.tags) as string[]) : null,
+    createdAt: new Date(m.createdAt),
+  }));
 }

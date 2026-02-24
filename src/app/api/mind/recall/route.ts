@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
+import { LOCAL_USER_ID } from '@/lib/local-user';
 import { searchMemories } from '@/lib/memory/manager';
 import { z } from 'zod';
 
@@ -9,14 +9,7 @@ const recallSchema = z.object({
 });
 
 export async function POST(request: Request): Promise<NextResponse> {
-  // Auth check
-  let userId: string | null = null;
-  try {
-    const session = await auth();
-    userId = session.userId;
-  } catch {
-    // Auth not available in dev
-  }
+  const userId = LOCAL_USER_ID;
 
   let body: z.infer<typeof recallSchema>;
   try {
@@ -28,11 +21,6 @@ export async function POST(request: Request): Promise<NextResponse> {
     body = result.data;
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
-  }
-
-  if (!userId) {
-    // Return empty results if not authenticated (dev mode graceful degradation)
-    return NextResponse.json({ ranked: [] });
   }
 
   const results = await searchMemories(userId, body.query, body.limit ?? 10);

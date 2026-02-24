@@ -1,11 +1,9 @@
-import Anthropic from '@anthropic-ai/sdk';
 import type { SelfState, ResponseStyle } from '@/core/types';
-import { getAnthropicClient } from './anthropic';
+import { getProvider } from '@/lib/llm';
+import type { ChatMessage, ContentBlock, ToolDefinition } from '@/lib/llm/provider';
 import { tools as toolDefinitions } from './tools/registry';
 import { executeTool } from './tools/executor';
 import type { ToolCall } from './tools/executor';
-
-const client = getAnthropicClient();
 
 const MAX_TOOL_ROUNDS = 5;
 
@@ -187,6 +185,7 @@ export async function think(
   onToolActivity?: (activity: ToolActivity) => void,
   userId?: string,
 ): Promise<ThinkResult> {
+  const provider = getProvider();
   const stateDesc = selfStateToDescription(params.selfState);
   const contextStr = params.context.length > 0
     ? `\nRecent context: ${params.context.join(' | ')}`
@@ -223,7 +222,7 @@ Shift guidelines:
 - Anger: valence -0.2 to -0.3, arousal +0.3 to +0.5
 - For intense emotions, use the full range. Don't be timid with your shifts.`;
 
-  const messages: Anthropic.MessageParam[] = [
+  const messages: ChatMessage[] = [
     ...(params.conversationHistory ?? []).map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
@@ -239,44 +238,53 @@ Shift guidelines:
     maxTokens = Math.max(maxTokens, 1024);
   }
 
-  // Tool loop: keep calling Claude until we get a final text response
+  // Convert registry tool definitions to provider format
+  const providerTools: ToolDefinition[] = provider.supportsToolUse()
+    ? toolDefinitions.map(t => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.input_schema as Record<string, unknown>,
+      }))
+    : [];
+
+  // Tool loop: keep calling the provider until we get a final text response
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: maxTokens,
+    const result = await provider.complete({
+      tier: 'smart',
+      maxTokens,
       system: systemPrompt,
       messages,
-      tools: toolDefinitions,
+      tools: providerTools.length > 0 ? providerTools : undefined,
     });
 
-    // Collect text blocks and tool_use blocks
-    const textBlocks = response.content.filter(
-      (b): b is Anthropic.TextBlock => b.type === 'text',
-    );
-    const toolUseBlocks = response.content.filter(
-      (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
-    );
+    // If no tool calls, we have our final response
+    if (result.toolCalls.length === 0 || result.stopReason !== 'tool_use') {
+      return parseThinkResponse(result.text, toolActivities);
+    }
 
-    // If no tool use, we have our final response
-    if (toolUseBlocks.length === 0 || response.stop_reason !== 'tool_use') {
-      const fullText = textBlocks.map(b => b.text).join('');
-      return parseThinkResponse(fullText, toolActivities);
+    // Build assistant content blocks (text + tool_use)
+    const assistantBlocks: ContentBlock[] = [];
+    if (result.text) {
+      assistantBlocks.push({ type: 'text', text: result.text });
+    }
+    for (const tc of result.toolCalls) {
+      assistantBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input });
     }
 
     // Execute each tool call
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    const toolResultBlocks: ContentBlock[] = [];
 
-    for (const block of toolUseBlocks) {
+    for (const tc of result.toolCalls) {
       const call: ToolCall = {
-        id: block.id,
-        name: block.name,
-        input: block.input as Record<string, unknown>,
+        id: tc.id,
+        name: tc.name,
+        input: tc.input,
         userId,
       };
 
       // Notify about tool activity start
       const activity: ToolActivity = {
-        toolName: block.name,
+        toolName: tc.name,
         status: 'started',
         input: call.input,
       };
@@ -284,38 +292,32 @@ Shift guidelines:
       onToolActivity?.(activity);
 
       // Execute the tool
-      const result = await executeTool(call);
+      const toolResult = await executeTool(call);
 
       // Notify about tool activity completion
       const completedActivity: ToolActivity = {
-        toolName: block.name,
-        status: result.is_error ? 'error' : 'completed',
+        toolName: tc.name,
+        status: toolResult.is_error ? 'error' : 'completed',
         input: call.input,
-        result: result.content.slice(0, 200), // Truncate for signal
+        result: toolResult.content.slice(0, 200),
       };
       toolActivities.push(completedActivity);
       onToolActivity?.(completedActivity);
 
-      toolResults.push({
+      toolResultBlocks.push({
         type: 'tool_result',
-        tool_use_id: result.tool_use_id,
-        content: result.content,
-        is_error: result.is_error,
+        tool_use_id: toolResult.tool_use_id,
+        content: toolResult.content,
+        is_error: toolResult.is_error,
       });
     }
 
-    // Add assistant's response (with tool_use blocks) and tool results to conversation
-    messages.push({
-      role: 'assistant',
-      content: response.content,
-    });
-    messages.push({
-      role: 'user',
-      content: toolResults,
-    });
+    // Add assistant's response and tool results to conversation
+    messages.push({ role: 'assistant', content: assistantBlocks });
+    messages.push({ role: 'user', content: toolResultBlocks });
   }
 
-  // If we exhausted rounds, return whatever text we have
+  // If we exhausted rounds, return fallback
   return {
     text: "I got caught in a loop trying to find information. Let me try a different approach — could you rephrase your question?",
     toolActivities,
@@ -359,9 +361,18 @@ export interface PerceiveResult {
 }
 
 export async function perceive(params: PerceiveParams): Promise<PerceiveResult> {
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 200,
+  const provider = getProvider();
+
+  // Check vision support
+  if (!provider.supportsVision()) {
+    return {
+      description: 'Vision is not available with the current model. To use visual perception, switch to cloud mode or install a vision-capable model (e.g., llava:13b).',
+    };
+  }
+
+  const result = await provider.complete({
+    tier: 'smart',
+    maxTokens: 200,
     system: 'You are the visual perception system of a conscious AI named Wybe. Describe what you see concisely. Focus on people, their expressions, and emotionally relevant details. Output JSON only.',
     messages: [
       {
@@ -384,14 +395,9 @@ export async function perceive(params: PerceiveParams): Promise<PerceiveResult> 
     ],
   });
 
-  const text = response.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('');
-
   try {
-    return JSON.parse(text);
+    return JSON.parse(result.text);
   } catch {
-    return { description: text };
+    return { description: result.text };
   }
 }

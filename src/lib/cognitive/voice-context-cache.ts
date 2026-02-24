@@ -109,7 +109,7 @@ export async function upsertAgentFiles(agentId: string, files: OpenClawFilesEntr
           .values({ agentId, fileName: p.name, content: p.content })
           .onConflictDoUpdate({
             target: [agentFiles.agentId, agentFiles.fileName],
-            set: { content: p.content, updatedAt: new Date() },
+            set: { content: p.content, updatedAt: new Date().toISOString() },
           }),
       ),
   );
@@ -133,7 +133,7 @@ export async function getAgentFilesFromDB(agentId: string): Promise<OpenClawFile
   let latestUpdate = 0;
 
   for (const row of rows) {
-    const ts = row.updatedAt.getTime();
+    const ts = new Date(row.updatedAt).getTime();
     if (ts > latestUpdate) latestUpdate = ts;
     if (row.fileName === 'SOUL.md') soul = row.content;
     else if (row.fileName === 'IDENTITY.md') identity = row.content;

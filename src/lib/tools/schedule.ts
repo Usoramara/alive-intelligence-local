@@ -53,7 +53,7 @@ export async function scheduleTask(params: {
       userId: params.userId ?? 'system',
       description: params.description,
       cronExpr: params.cron ?? null,
-      nextRunAt,
+      nextRunAt: nextRunAt.toISOString(),
       timezone: params.timezone ?? 'UTC',
       status: 'active',
       payload: JSON.stringify({ type: 'reminder', message: params.description }),
@@ -88,7 +88,7 @@ export async function listSchedules(params: {
   const schedules = jobs.map(j => ({
     id: j.id,
     description: j.description,
-    next_run_at: j.nextRunAt.toISOString(),
+    next_run_at: j.nextRunAt,
     cron: j.cronExpr ?? undefined,
     status: j.status,
   }));
@@ -109,7 +109,7 @@ export async function cancelSchedule(params: {
 
   const updated = await db
     .update(scheduledJobs)
-    .set({ status: 'cancelled', updatedAt: new Date() })
+    .set({ status: 'cancelled', updatedAt: new Date().toISOString() })
     .where(and(...conditions))
     .returning();
 
@@ -126,7 +126,7 @@ export async function cancelSchedule(params: {
  */
 export async function processDueJobs(): Promise<Array<{ id: string; userId: string; description: string; payload: string }>> {
   const db = getDb();
-  const now = new Date();
+  const now = new Date().toISOString();
 
   const dueJobs = await db
     .select()
@@ -151,13 +151,13 @@ export async function processDueJobs(): Promise<Array<{ id: string; userId: stri
       const nextRun = parseCronToNextRun(job.cronExpr, job.timezone ?? 'UTC');
       await db
         .update(scheduledJobs)
-        .set({ nextRunAt: nextRun, updatedAt: new Date() })
+        .set({ nextRunAt: nextRun.toISOString(), updatedAt: new Date().toISOString() })
         .where(eq(scheduledJobs.id, job.id));
     } else {
       // One-time: mark as completed
       await db
         .update(scheduledJobs)
-        .set({ status: 'completed', updatedAt: new Date() })
+        .set({ status: 'completed', updatedAt: new Date().toISOString() })
         .where(eq(scheduledJobs.id, job.id));
     }
   }

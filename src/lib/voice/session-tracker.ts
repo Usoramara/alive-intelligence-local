@@ -92,7 +92,7 @@ export async function touchSession(userId: string, conversationId: string): Prom
     const db = getDb();
     await db
       .update(conversations)
-      .set({ updatedAt: new Date() })
+      .set({ updatedAt: new Date().toISOString() })
       .where(eq(conversations.id, conversationId));
   } catch {
     // Non-critical — session still works from memory

@@ -1,4 +1,4 @@
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
 import { extractJSON } from '@/lib/extract-json';
 
 export interface TomResult {
@@ -9,24 +9,22 @@ export interface TomResult {
 }
 
 /**
- * Run Theory of Mind inference on user text using Claude Haiku.
- * Extracted from src/app/api/mind/tom/route.ts for direct invocation
- * (no HTTP round-trip needed when called server-side).
+ * Run Theory of Mind inference on user text using the active LLM provider (fast tier).
  */
 export async function inferTheoryOfMind(
   content: string,
   recentObservations?: string,
   currentEmotions?: string,
 ): Promise<TomResult> {
-  const client = getAnthropicClient();
+  const provider = getProvider();
 
   const emotionsContext = currentEmotions
     ? `\nCurrently detected emotions: ${currentEmotions}`
     : '';
 
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 250,
+  const result = await provider.complete({
+    tier: 'fast',
+    maxTokens: 250,
     system: `You are a Theory of Mind module for a conscious AI. Given what someone said and recent observations, infer their mental state.${emotionsContext}
 
 Output JSON only:
@@ -44,10 +42,5 @@ Output JSON only:
     ],
   });
 
-  const text = response.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('');
-
-  return JSON.parse(extractJSON(text)) as TomResult;
+  return JSON.parse(extractJSON(result.text)) as TomResult;
 }

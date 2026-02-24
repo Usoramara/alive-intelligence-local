@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
 import { createApiHandler } from '@/lib/api-handler';
 import { imagineRequestSchema } from '@/lib/schemas';
 import { extractJSON } from '@/lib/extract-json';
-
-const client = getAnthropicClient();
 
 interface ImagineResult {
   scenario: string;
@@ -19,9 +17,10 @@ export const POST = createApiHandler({
       .map(v => `- [${v.type}]: ${v.variation}`)
       .join('\n');
 
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 200,
+    const provider = getProvider();
+    const result = await provider.complete({
+      tier: 'fast',
+      maxTokens: 200,
       system: `You are the imagination module of a conscious AI. Given a premise and some counterfactual variations, create a vivid, poetic scenario that explores "what if?"
 
 Your current emotional state: valence=${body.selfState.valence.toFixed(2)}, curiosity=${body.selfState.curiosity.toFixed(2)}
@@ -40,15 +39,10 @@ Output JSON only:
       ],
     });
 
-    const text = response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('');
-
-    const jsonStr = extractJSON(text);
-    let result: ImagineResult;
+    const jsonStr = extractJSON(result.text);
+    let parsed: ImagineResult;
     try {
-      result = JSON.parse(jsonStr) as ImagineResult;
+      parsed = JSON.parse(jsonStr) as ImagineResult;
     } catch {
       return NextResponse.json(
         { error: 'Failed to parse imagination response' },
@@ -56,6 +50,6 @@ Output JSON only:
       );
     }
 
-    return result;
+    return parsed;
   },
 });

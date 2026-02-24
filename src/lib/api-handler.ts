@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
+import { LOCAL_USER_ID } from '@/lib/local-user';
 import type { ZodSchema, ZodError } from 'zod';
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -7,24 +7,13 @@ const isDev = process.env.NODE_ENV === 'development';
 interface ApiHandlerOptions<T> {
   schema: ZodSchema<T>;
   handler: (body: T, userId: string | null) => Promise<NextResponse | object>;
-  requireAuth?: boolean; // default: true in production, false in dev
+  requireAuth?: boolean;
 }
 
-export function createApiHandler<T>({ schema, handler, requireAuth }: ApiHandlerOptions<T>) {
+export function createApiHandler<T>({ schema, handler }: ApiHandlerOptions<T>) {
   return async function POST(request: Request): Promise<NextResponse> {
-    // Auth check
-    let userId: string | null = null;
-    try {
-      const session = await auth();
-      userId = session.userId;
-    } catch {
-      // Auth not available (e.g., missing Clerk keys in dev)
-    }
-
-    const authRequired = requireAuth ?? !isDev;
-    if (authRequired && !userId) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    // Local mode: always use the local user
+    const userId: string = LOCAL_USER_ID;
 
     // Parse and validate body
     let body: T;

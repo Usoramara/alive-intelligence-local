@@ -1,4 +1,4 @@
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
 import { extractJSON } from '@/lib/extract-json';
 
 export interface EmotionDetectionResult {
@@ -9,19 +9,17 @@ export interface EmotionDetectionResult {
 }
 
 /**
- * Detect emotions in text using Claude Haiku.
- * Extracted from src/app/api/mind/detect-emotion/route.ts for direct invocation
- * (no HTTP round-trip needed when called server-side).
+ * Detect emotions in text using the active LLM provider (fast tier).
  */
 export async function detectEmotion(
   text: string,
   context?: string,
 ): Promise<EmotionDetectionResult> {
-  const client = getAnthropicClient();
+  const provider = getProvider();
 
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 150,
+  const result = await provider.complete({
+    tier: 'fast',
+    maxTokens: 150,
     system: `You are an emotion detection system. Analyze the user's text for emotional content.
 Return ONLY valid JSON with this exact structure:
 {"emotions": ["emotion1", "emotion2"], "valence": 0.0, "arousal": 0.0, "confidence": 0.0}
@@ -42,10 +40,5 @@ Consider sarcasm, context, implicit emotions, and tone. "Fine." after bad news =
     ],
   });
 
-  const responseText = response.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('');
-
-  return JSON.parse(extractJSON(responseText));
+  return JSON.parse(extractJSON(result.text));
 }

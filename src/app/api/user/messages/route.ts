@@ -1,14 +1,11 @@
 import { NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
+import { LOCAL_USER_ID } from '@/lib/local-user';
 import { getDb } from '@/db';
 import { messages, conversations } from '@/db/schema';
 import { eq, and, asc } from 'drizzle-orm';
 
 export async function GET(request: Request): Promise<NextResponse> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const userId = LOCAL_USER_ID;
 
   const { searchParams } = new URL(request.url);
   const conversationId = searchParams.get('conversationId');
@@ -18,7 +15,6 @@ export async function GET(request: Request): Promise<NextResponse> {
 
   const db = getDb();
 
-  // Verify conversation belongs to user
   const [conv] = await db
     .select({ id: conversations.id })
     .from(conversations)
@@ -46,10 +42,7 @@ export async function GET(request: Request): Promise<NextResponse> {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const userId = LOCAL_USER_ID;
 
   const body = await request.json();
   const { conversationId, role, content, emotionShift, metadata } = body;
@@ -60,7 +53,6 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const db = getDb();
 
-  // Verify conversation belongs to user
   const [conv] = await db
     .select({ id: conversations.id })
     .from(conversations)
@@ -76,15 +68,14 @@ export async function POST(request: Request): Promise<NextResponse> {
       conversationId,
       role,
       content,
-      emotionShift: emotionShift ?? null,
-      metadata: metadata ?? null,
+      emotionShift: emotionShift ? JSON.stringify(emotionShift) : null,
+      metadata: metadata ? JSON.stringify(metadata) : null,
     })
     .returning();
 
-  // Update conversation's updatedAt
   await db
     .update(conversations)
-    .set({ updatedAt: new Date() })
+    .set({ updatedAt: new Date().toISOString() })
     .where(eq(conversations.id, conversationId));
 
   return NextResponse.json({ message });

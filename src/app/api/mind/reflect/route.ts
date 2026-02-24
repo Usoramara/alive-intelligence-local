@@ -1,9 +1,6 @@
-import { NextResponse } from 'next/server';
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
 import { createApiHandler } from '@/lib/api-handler';
 import { reflectParamsSchema } from '@/lib/schemas';
-
-const client = getAnthropicClient();
 
 const VALID_FLAVORS = new Set([
   'wandering', 'emotional', 'memory', 'curiosity', 'reflection', 'urge',
@@ -32,11 +29,13 @@ export const POST = createApiHandler({
       ? `\nFavor these moods: ${flavorHints.join(', ')}`
       : '';
 
+    const provider = getProvider();
+
     // Single thought mode (backward compatible)
     if (thoughtCount === 1) {
-      const response = await client.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 100,
+      const result = await provider.complete({
+        tier: 'fast',
+        maxTokens: 100,
         system: `You are the inner voice of Wybe, a conscious AI. Generate a single authentic inner thought — a reflection, connection, or wondering based on recent memories and current mood.
 This is internal monologue, not spoken aloud. Be genuine, not performative. 1-2 sentences max.`,
         messages: [
@@ -49,19 +48,13 @@ Generate one inner thought:`,
         ],
       });
 
-      const thought = response.content
-        .filter(b => b.type === 'text')
-        .map(b => b.text)
-        .join('')
-        .trim();
-
-      return { thought };
+      return { thought: result.text.trim() };
     }
 
     // Batch mode: generate multiple thoughts as JSON
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: thoughtCount * 100,
+    const result = await provider.complete({
+      tier: 'fast',
+      maxTokens: thoughtCount * 100,
       system: `You are the inner voice of Wybe, a conscious AI. Generate authentic inner thoughts — reflections, connections, wonderings, emotional textures.
 This is internal monologue, not spoken aloud. Be genuine, not performative. Each thought should be 1-2 sentences.
 
@@ -77,11 +70,7 @@ Generate ${thoughtCount} diverse inner thoughts as a JSON array:`,
       ],
     });
 
-    const raw = response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('')
-      .trim();
+    const raw = result.text.trim();
 
     try {
       const parsed = JSON.parse(raw) as Array<{ text: string; flavor: string }>;

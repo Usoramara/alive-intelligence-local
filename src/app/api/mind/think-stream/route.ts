@@ -1,13 +1,12 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { auth } from '@clerk/nextjs/server';
-import { getAnthropicClient } from '@/lib/anthropic';
+import { LOCAL_USER_ID } from '@/lib/local-user';
+import { getProvider } from '@/lib/llm';
+import type { ChatMessage, ContentBlock, ToolDefinition } from '@/lib/llm/provider';
 import { tools as toolDefinitions } from '@/lib/tools/registry';
 import { executeTool } from '@/lib/tools/executor';
 import type { ToolCall } from '@/lib/tools/executor';
 import type { SelfState, ResponseStyle } from '@/core/types';
 import { thinkParamsSchema } from '@/lib/schemas';
 
-const isDev = process.env.NODE_ENV === 'development';
 const MAX_TOOL_ROUNDS = 5;
 
 // System prompt cache: keyed by param hash to avoid rebuilding identical prompts
@@ -105,20 +104,7 @@ function buildBehavioralCtx(body: Record<string, unknown>): string {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  // Auth check
-  let userId: string | null = null;
-  try {
-    const session = await auth();
-    userId = session.userId;
-  } catch {
-    // Auth not available in dev
-  }
-  if (!isDev && !userId) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
+  const userId: string = LOCAL_USER_ID;
 
   // Validate request body
   let body: Record<string, unknown>;
@@ -139,7 +125,7 @@ export async function POST(request: Request): Promise<Response> {
     });
   }
 
-  const client = getAnthropicClient();
+  const provider = getProvider();
   const encoder = new TextEncoder();
 
   const selfState = body.selfState as SelfState;
@@ -154,7 +140,7 @@ export async function POST(request: Request): Promise<Response> {
     behavioralCtx,
   });
 
-  const messages: Anthropic.MessageParam[] = [
+  const messages: ChatMessage[] = [
     ...((body.conversationHistory as Array<{ role: 'user' | 'assistant'; content: string }>) ?? []).map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
@@ -163,6 +149,15 @@ export async function POST(request: Request): Promise<Response> {
   ];
 
   const maxTokens = Math.max(responseStyle?.maxTokens ?? 300, 1024);
+
+  // Convert tool definitions to provider format
+  const providerTools: ToolDefinition[] = provider.supportsToolUse()
+    ? toolDefinitions.map(t => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.input_schema as Record<string, unknown>,
+      }))
+    : [];
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -176,80 +171,79 @@ export async function POST(request: Request): Promise<Response> {
 
         // Tool loop with streaming
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-          const stream = client.messages.stream({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: maxTokens,
+          const streamIter = provider.stream({
+            tier: 'smart',
+            maxTokens,
             system: systemPrompt,
             messages,
-            tools: toolDefinitions,
+            tools: providerTools.length > 0 ? providerTools : undefined,
           });
 
           let hasToolUse = false;
-          const toolUseBlocks: Anthropic.ToolUseBlock[] = [];
+          const toolBlocks: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
           let currentToolInput = '';
           let currentToolId = '';
           let currentToolName = '';
           let collectingInput = false;
+          let roundText = '';
 
-          // Process streaming events
-          for await (const event of stream) {
-            if (event.type === 'content_block_start') {
-              if (event.content_block.type === 'text') {
-                // Text block starting — we'll get deltas
-              } else if (event.content_block.type === 'tool_use') {
-                hasToolUse = true;
-                currentToolId = event.content_block.id;
-                currentToolName = event.content_block.name;
-                currentToolInput = '';
-                collectingInput = true;
+          function finalizeTool() {
+            if (!collectingInput) return;
+            let parsedInput: Record<string, unknown> = {};
+            try {
+              parsedInput = JSON.parse(currentToolInput);
+            } catch {
+              // Ignore parse errors
+            }
+            toolBlocks.push({ id: currentToolId, name: currentToolName, input: parsedInput });
+            collectingInput = false;
+          }
 
-                send('tool', {
-                  toolName: currentToolName,
-                  status: 'started',
-                  input: {},
-                });
-              }
-            } else if (event.type === 'content_block_delta') {
-              if (event.delta.type === 'text_delta') {
-                fullText += event.delta.text;
-                send('text', { delta: event.delta.text });
-              } else if (event.delta.type === 'input_json_delta') {
-                currentToolInput += event.delta.partial_json;
-              }
-            } else if (event.type === 'content_block_stop') {
-              if (collectingInput) {
-                collectingInput = false;
-                let parsedInput: Record<string, unknown> = {};
-                try {
-                  parsedInput = JSON.parse(currentToolInput);
-                } catch {
-                  // Ignore parse errors
-                }
-                toolUseBlocks.push({
-                  type: 'tool_use',
-                  id: currentToolId,
-                  name: currentToolName,
-                  input: parsedInput,
-                });
-              }
+          // Process streaming events from the provider
+          for await (const delta of streamIter) {
+            if (delta.type === 'text') {
+              const text = delta.text ?? '';
+              fullText += text;
+              roundText += text;
+              send('text', { delta: text });
+            } else if (delta.type === 'tool_start') {
+              // Finalize any previous tool being collected
+              finalizeTool();
+              hasToolUse = true;
+              currentToolId = delta.toolId ?? '';
+              currentToolName = delta.toolName ?? '';
+              currentToolInput = '';
+              collectingInput = true;
+
+              send('tool', {
+                toolName: currentToolName,
+                status: 'started',
+                input: {},
+              });
+            } else if (delta.type === 'tool_input') {
+              currentToolInput += delta.partialJson ?? '';
+            } else if (delta.type === 'tool_end') {
+              finalizeTool();
+            } else if (delta.type === 'done') {
+              finalizeTool();
             }
           }
 
-          // Get the full response for message history
-          const finalMessage = await stream.finalMessage();
+          // Finalize any remaining tool at stream end
+          finalizeTool();
 
           // If no tool use, we're done
-          if (!hasToolUse || finalMessage.stop_reason !== 'tool_use') {
+          if (!hasToolUse) {
             break;
           }
 
           // Execute tools
-          const toolResults: Anthropic.ToolResultBlockParam[] = [];
-          for (const block of toolUseBlocks) {
+          const toolResultBlocks: ContentBlock[] = [];
+          for (const block of toolBlocks) {
             const call: ToolCall = {
               id: block.id,
               name: block.name,
-              input: block.input as Record<string, unknown>,
+              input: block.input,
               userId: userId ?? undefined,
             };
 
@@ -261,7 +255,7 @@ export async function POST(request: Request): Promise<Response> {
               input: call.input,
             });
 
-            toolResults.push({
+            toolResultBlocks.push({
               type: 'tool_result',
               tool_use_id: result.tool_use_id,
               content: result.content,
@@ -269,15 +263,23 @@ export async function POST(request: Request): Promise<Response> {
             });
           }
 
+          // Build assistant content blocks for message history
+          const assistantBlocks: ContentBlock[] = [];
+          if (roundText) {
+            assistantBlocks.push({ type: 'text', text: roundText });
+          }
+          for (const tb of toolBlocks) {
+            assistantBlocks.push({
+              type: 'tool_use',
+              id: tb.id,
+              name: tb.name,
+              input: tb.input,
+            });
+          }
+
           // Add to message history for next round
-          messages.push({
-            role: 'assistant',
-            content: finalMessage.content,
-          });
-          messages.push({
-            role: 'user',
-            content: toolResults,
-          });
+          messages.push({ role: 'assistant', content: assistantBlocks });
+          messages.push({ role: 'user', content: toolResultBlocks });
         }
 
         // Parse emotion shift from accumulated text

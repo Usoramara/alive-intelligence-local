@@ -1,4 +1,4 @@
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
 import { extractJSON } from '@/lib/extract-json';
 import { updateCognitiveState } from '@/lib/cognitive/state-updater';
 import { getDb } from '@/db';
@@ -13,13 +13,6 @@ const DEFAULT_STATE: SelfState = {
 
 /**
  * Extract emotion shift from a voice exchange asynchronously.
- *
- * The voice prompt strips SHIFT instructions (to prevent Claude saying
- * "SHIFT: {...}" aloud). Instead, we extract emotion shifts post-hoc
- * by asking Haiku to analyze the exchange and return shift deltas.
- *
- * Then we apply the shift to the user's cognitive state, making voice
- * evolve the intelligence identically to chat.
  */
 export async function extractVoiceShift(params: {
   userId: string;
@@ -30,11 +23,11 @@ export async function extractVoiceShift(params: {
 
   if (!userMessage.trim() || !assistantResponse.trim()) return null;
 
-  const client = getAnthropicClient();
+  const provider = getProvider();
 
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 150,
+  const result = await provider.complete({
+    tier: 'fast',
+    maxTokens: 150,
     system: `You analyze voice conversations and determine how they shift the AI's emotional state.
 Given a user message and assistant response, return ONLY valid JSON with emotion shift deltas:
 {"valence": 0.0, "arousal": 0.0, "confidence": 0.0, "energy": 0.0, "social": 0.0, "curiosity": 0.0}
@@ -56,16 +49,11 @@ Only include dimensions that actually shifted. Omit unchanged dimensions.`,
     ],
   });
 
-  const responseText = response.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('');
-
   let shift: Partial<SelfState>;
   try {
-    shift = JSON.parse(extractJSON(responseText));
+    shift = JSON.parse(extractJSON(result.text));
   } catch {
-    console.warn('[voice-shift] Failed to parse Haiku response:', responseText);
+    console.warn('[voice-shift] Failed to parse response:', result.text);
     return null;
   }
 
@@ -92,7 +80,6 @@ Only include dimensions that actually shifted. Omit unchanged dimensions.`,
     // Use default state
   }
 
-  // Apply shift via existing cognitive state updater
   await updateCognitiveState(userId, currentState, shift);
 
   console.log('[voice-shift] Emotion shift applied:', shift);

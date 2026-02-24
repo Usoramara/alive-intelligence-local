@@ -55,7 +55,7 @@ export async function updateCognitiveState(
       .values({ userId, ...newState })
       .onConflictDoUpdate({
         target: cognitiveStates.userId,
-        set: { ...newState, updatedAt: new Date() },
+        set: { ...newState, updatedAt: new Date().toISOString() },
       });
   } catch {
     // Non-critical — state update failure doesn't affect the response

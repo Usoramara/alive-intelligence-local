@@ -1,9 +1,7 @@
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
 import { createApiHandler } from '@/lib/api-handler';
 import { growParamsSchema } from '@/lib/schemas';
 import { extractJSON } from '@/lib/extract-json';
-
-const client = getAnthropicClient();
 
 export const POST = createApiHandler({
   schema: growParamsSchema,
@@ -12,9 +10,10 @@ export const POST = createApiHandler({
       .map(e => `${e.role === 'user' ? 'User' : 'Wybe'}: ${e.content}`)
       .join('\n');
 
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 300,
+    const provider = getProvider();
+    const result = await provider.complete({
+      tier: 'fast',
+      maxTokens: 300,
       system: `You are Wybe's self-reflection system. After a conversation ends, analyze what happened and extract growth insights.
 Return ONLY valid JSON:
 {
@@ -39,11 +38,6 @@ Analyze this conversation:`,
       ],
     });
 
-    const responseText = response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('');
-
-    return JSON.parse(extractJSON(responseText));
+    return JSON.parse(extractJSON(result.text));
   },
 });

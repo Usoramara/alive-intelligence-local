@@ -1,11 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { NextResponse } from 'next/server';
 import type { SelfState } from '@/core/types';
-import { getAnthropicClient } from '@/lib/anthropic';
+import { getProvider } from '@/lib/llm';
 import { createApiHandler } from '@/lib/api-handler';
 import { thinkLiteParamsSchema } from '@/lib/schemas';
-
-const client = getAnthropicClient();
 
 export const POST = createApiHandler({
   schema: thinkLiteParamsSchema,
@@ -20,26 +16,23 @@ export const POST = createApiHandler({
 Be concise (1-2 sentences). Let your emotions shape your tone.
 After your response, output: SHIFT: {"valence": 0.0, "arousal": 0.0} (range: -0.3 to 0.3)`;
 
-    const messages: Anthropic.MessageParam[] = [
+    const messages = [
       ...(params.conversationHistory ?? []).slice(-6).map(m => ({
         role: m.role as 'user' | 'assistant',
         content: m.content,
       })),
-      { role: 'user', content: params.content },
+      { role: 'user' as const, content: params.content },
     ];
 
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 150,
+    const provider = getProvider();
+    const result = await provider.complete({
+      tier: 'fast',
+      maxTokens: 150,
       system: systemPrompt,
       messages,
     });
 
-    const fullText = response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('');
-
+    const fullText = result.text;
     let emotionShift: Partial<SelfState> | undefined;
     let text = fullText;
 

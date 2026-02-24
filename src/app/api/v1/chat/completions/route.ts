@@ -6,10 +6,9 @@ import {
   getOpenClawFiles,
 } from '@/lib/cognitive/voice-context-cache';
 import { persistVoiceTurn } from '@/lib/voice/persistence';
+import { getProvider, getProviderMode } from '@/lib/llm';
+import type { ChatMessage, ToolDefinition } from '@/lib/llm/provider';
 import type { SelfState } from '@/core/types';
-
-const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
 
 const DEFAULT_STATE: SelfState = {
   valence: 0.6, arousal: 0.3, confidence: 0.5,
@@ -32,7 +31,7 @@ const DEFAULT_STATE: SelfState = {
  * Flow:
  *   ElevenLabs → POST /api/v1/chat/completions
  *     → immediate Response(stream) with role chunk
- *     → read cached context (or basic fallback) → Claude API → clean OpenAI SSE proxy
+ *     → read cached context (or basic fallback) → LLM provider → clean OpenAI SSE proxy
  *     → async: refresh cache with user's message for next call
  */
 export async function POST(request: Request): Promise<Response> {
@@ -69,10 +68,10 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  // 4. Extract system prompt and convert messages to Anthropic format
-  const { systemPrompt, anthropicMessages, lastUserMessage } = convertOpenAIToAnthropic(body.messages);
+  // 4. Extract system prompt and convert messages
+  const { systemPrompt, chatMessages, lastUserMessage } = convertMessages(body.messages);
 
-  if (anthropicMessages.length === 0) {
+  if (chatMessages.length === 0) {
     return jsonResponse(
       { error: { message: 'No user or assistant messages provided', type: 'invalid_request_error', code: 'invalid_messages' } },
       400,
@@ -81,6 +80,7 @@ export async function POST(request: Request): Promise<Response> {
 
   const isStreaming = !!body.stream;
   const completionId = `chatcmpl-${generateId()}`;
+  const modelName = getProviderMode() === 'cloud' ? 'claude-sonnet-4-20250514' : 'ollama';
 
   console.log(`[voice] Request body:`, JSON.stringify({
     model: body.model,
@@ -88,19 +88,23 @@ export async function POST(request: Request): Promise<Response> {
     messages: body.messages?.length,
     tools: (body.tools as OpenAITool[] | undefined)?.map((t) => t.function?.name ?? t.name),
     max_tokens: body.max_tokens,
+    provider: getProviderMode(),
   }));
 
-  // Convert OpenAI tools to Anthropic tools, excluding end_call
-  const anthropicTools = ((body.tools as OpenAITool[] | undefined) ?? [])
-    .filter((t) => {
-      const name = t.function?.name ?? t.name;
-      return name !== 'end_call'; // Never let Claude end the call
-    })
-    .map((t) => ({
-      name: t.function?.name ?? t.name ?? '',
-      description: t.function?.description ?? t.description ?? '',
-      input_schema: t.function?.parameters ?? t.parameters ?? { type: 'object' as const, properties: {} },
-    }));
+  // Convert OpenAI tools to provider ToolDefinition format, excluding end_call
+  const provider = getProvider();
+  const providerTools: ToolDefinition[] = provider.supportsToolUse()
+    ? ((body.tools as OpenAITool[] | undefined) ?? [])
+        .filter((t) => {
+          const name = t.function?.name ?? t.name;
+          return name !== 'end_call'; // Never let the model end the call
+        })
+        .map((t) => ({
+          name: t.function?.name ?? t.name ?? '',
+          description: t.function?.description ?? t.description ?? '',
+          input_schema: (t.function?.parameters ?? t.parameters ?? { type: 'object' as const, properties: {} }) as Record<string, unknown>,
+        }))
+    : [];
 
   // ── Streaming path: return Response IMMEDIATELY, do slow work inside stream ──
   if (isStreaming) {
@@ -116,7 +120,7 @@ export async function POST(request: Request): Promise<Response> {
           id: completionId,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
-          model: DEFAULT_MODEL,
+          model: modelName,
           choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
         };
         await writer.write(encoder.encode(`data: ${JSON.stringify(roleChunk)}\n\n`));
@@ -140,115 +144,57 @@ export async function POST(request: Request): Promise<Response> {
         // Fire-and-forget: refresh cache for NEXT call (populates cache after cold start)
         refreshVoiceContext(userId, lastUserMessage).catch(() => {});
 
-        const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-        if (!anthropicApiKey) {
-          console.error('[voice] No ANTHROPIC_API_KEY configured');
-          await writeErrorAndDone(writer, encoder, completionId, "I can't connect to my brain right now. Try again in a moment.");
-          return;
-        }
-
-        // Call Anthropic API
-        const anthropicBody = {
-          model: DEFAULT_MODEL,
-          system: voiceSystemPrompt,
-          messages: anthropicMessages,
-          max_tokens: body.max_tokens ?? 1024,
-          stream: true,
-          ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
-        };
-
-        let upstreamResponse: Response;
-        const controller = new AbortController();
-        const abortTimeout = setTimeout(() => controller.abort(), 15_000);
-        try {
-          upstreamResponse = await fetch(ANTHROPIC_API_URL, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': anthropicApiKey,
-              'anthropic-version': '2023-06-01',
-            },
-            body: JSON.stringify(anthropicBody),
-            signal: controller.signal,
-          });
-        } catch (fetchError) {
-          clearTimeout(abortTimeout);
-          const isTimeout = fetchError instanceof DOMException && fetchError.name === 'AbortError';
-          console.error(`[voice] Fetch to Anthropic ${isTimeout ? 'timed out' : 'failed'}:`, fetchError);
-          await writeErrorAndDone(writer, encoder, completionId,
-            isTimeout ? "Sorry, I took too long to think. Let me try again." : "I'm having a moment, give me a second.");
-          return;
-        }
-        clearTimeout(abortTimeout);
-
-        if (!upstreamResponse.ok) {
-          const errorBody = await upstreamResponse.text();
-          console.error('[voice] Anthropic API error:', upstreamResponse.status, errorBody);
-          await writeErrorAndDone(writer, encoder, completionId, "Something went wrong on my end. Let me try again.");
-          return;
-        }
-
-        console.log(`[voice] Anthropic responded ${upstreamResponse.status}, streaming=true`);
-
-        const upstreamBody = upstreamResponse.body;
-        if (!upstreamBody) {
-          await writeFinishAndDone(writer, encoder, completionId);
-          return;
-        }
-
-        // Read Anthropic stream, transform to OpenAI SSE, write to client
-        // Clean proxy — no SHIFT filtering, no content manipulation
-        const decoder = new TextDecoder();
-        const reader = upstreamBody.getReader();
-        let sseRemainder = '';
+        // Stream from the LLM provider
         let fullResponseText = '';
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        try {
+          const streamIter = provider.stream({
+            tier: 'smart',
+            maxTokens: body.max_tokens ?? 1024,
+            system: voiceSystemPrompt,
+            messages: chatMessages,
+            tools: providerTools.length > 0 ? providerTools : undefined,
+          });
 
-          const raw = decoder.decode(value, { stream: true });
-          sseRemainder += raw;
-          const parts = sseRemainder.split('\n\n');
-          sseRemainder = parts.pop() ?? '';
+          for await (const delta of streamIter) {
+            if (delta.type === 'text' && delta.text) {
+              fullResponseText += delta.text;
 
-          for (const part of parts) {
-            if (!part.trim()) continue;
-            const { isTextDelta, text } = parseAnthropicSSE(part);
-            if (!isTextDelta || text === null) continue;
-            fullResponseText += text;
-
-            await writer.write(encoder.encode(
-              `data: ${JSON.stringify({
-                id: completionId,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: DEFAULT_MODEL,
-                choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
-              })}\n\n`
-            ));
+              await writer.write(encoder.encode(
+                `data: ${JSON.stringify({
+                  id: completionId,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: modelName,
+                  choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
+                })}\n\n`
+              ));
+            } else if (delta.type === 'error') {
+              console.error('[voice] Stream error from provider:', delta.error);
+              if (!fullResponseText) {
+                await writer.write(encoder.encode(
+                  `data: ${JSON.stringify({
+                    id: completionId,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: modelName,
+                    choices: [{ index: 0, delta: { content: "I'm having a moment, give me a second." }, finish_reason: null }],
+                  })}\n\n`
+                ));
+              }
+            }
+            // Tool events are not forwarded to ElevenLabs (voice doesn't use tools interactively)
           }
-        }
-
-        // Flush SSE remainder
-        if (sseRemainder.trim()) {
-          const { isTextDelta, text } = parseAnthropicSSE(sseRemainder);
-          if (isTextDelta && text !== null) {
-            fullResponseText += text;
-            await writer.write(encoder.encode(
-              `data: ${JSON.stringify({
-                id: completionId,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: DEFAULT_MODEL,
-                choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
-              })}\n\n`
-            ));
+        } catch (providerError) {
+          console.error('[voice] Provider stream error:', providerError);
+          if (!fullResponseText) {
+            await writeErrorAndDone(writer, encoder, completionId, modelName, "I'm having a moment, give me a second.");
+            return;
           }
         }
 
         // Send finish chunk and [DONE]
-        await writeFinishAndDone(writer, encoder, completionId);
+        await writeFinishAndDone(writer, encoder, completionId, modelName);
 
         // Persist voice turn — runs after response completes (survives function return)
         after(async () => {
@@ -264,7 +210,7 @@ export async function POST(request: Request): Promise<Response> {
         });
       } catch (err) {
         console.error('[voice] Stream error:', err);
-        try { await writeErrorAndDone(writer, encoder, completionId); } catch {}
+        try { await writeErrorAndDone(writer, encoder, completionId, modelName); } catch {}
       }
     })();
 
@@ -293,87 +239,55 @@ export async function POST(request: Request): Promise<Response> {
   // Fire-and-forget cache refresh
   refreshVoiceContext(userId, lastUserMessage).catch(() => {});
 
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-  if (!anthropicApiKey) {
-    return jsonResponse(
-      { error: { message: 'Anthropic API key not configured', type: 'server_error', code: 'server_error' } },
-      500,
-    );
-  }
-
-  const anthropicBody = {
-    model: DEFAULT_MODEL,
-    system: voiceSystemPromptNS,
-    messages: anthropicMessages,
-    max_tokens: body.max_tokens ?? 1024,
-    stream: false,
-    ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
-  };
-
-  let upstreamResponse: Response;
   try {
-    upstreamResponse = await fetch(ANTHROPIC_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': anthropicApiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(anthropicBody),
+    const result = await provider.complete({
+      tier: 'smart',
+      maxTokens: body.max_tokens ?? 1024,
+      system: voiceSystemPromptNS,
+      messages: chatMessages,
+      tools: providerTools.length > 0 ? providerTools : undefined,
     });
-  } catch (fetchError) {
-    console.error('[voice] Fetch to Anthropic failed:', fetchError);
-    return jsonResponse(
-      { error: { message: 'Failed to reach upstream API', type: 'server_error', code: 'upstream_error' } },
-      502,
-    );
-  }
 
-  if (!upstreamResponse.ok) {
-    const errorBody = await upstreamResponse.text();
-    console.error('[voice] Anthropic API error:', upstreamResponse.status, errorBody);
-    return jsonResponse(
-      { error: { message: 'Upstream API error', type: 'server_error', code: 'upstream_error' } },
-      502,
-    );
-  }
+    const fullText = result.text;
 
-  console.log(`[voice] Anthropic responded ${upstreamResponse.status}, streaming=false`);
+    // Persist voice turn — runs after response completes (survives function return)
+    after(async () => {
+      try {
+        await persistVoiceTurn({
+          userId,
+          userMessage: lastUserMessage,
+          assistantResponse: fullText,
+        });
+      } catch (e) {
+        console.error('[voice] Persistence failed:', e);
+      }
+    });
 
-  const responseJson = await upstreamResponse.json();
-  const fullText = extractTextFromAnthropicResponse(responseJson);
-
-  // Persist voice turn — runs after response completes (survives function return)
-  after(async () => {
-    try {
-      await persistVoiceTurn({
-        userId,
-        userMessage: lastUserMessage,
-        assistantResponse: fullText,
-      });
-    } catch (e) {
-      console.error('[voice] Persistence failed:', e);
-    }
-  });
-
-  return jsonResponse({
-    id: completionId,
-    object: 'chat.completion',
-    created: Math.floor(Date.now() / 1000),
-    model: DEFAULT_MODEL,
-    choices: [
-      {
-        index: 0,
-        message: { role: 'assistant', content: fullText.trim() },
-        finish_reason: 'stop',
+    return jsonResponse({
+      id: completionId,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content: fullText.trim() },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: {
+        prompt_tokens: result.usage.inputTokens,
+        completion_tokens: result.usage.outputTokens,
+        total_tokens: result.usage.inputTokens + result.usage.outputTokens,
       },
-    ],
-    usage: {
-      prompt_tokens: responseJson.usage?.input_tokens ?? 0,
-      completion_tokens: responseJson.usage?.output_tokens ?? 0,
-      total_tokens: (responseJson.usage?.input_tokens ?? 0) + (responseJson.usage?.output_tokens ?? 0),
-    },
-  });
+    });
+  } catch (error) {
+    console.error('[voice] Provider error:', error);
+    return jsonResponse(
+      { error: { message: 'LLM provider error', type: 'server_error', code: 'provider_error' } },
+      502,
+    );
+  }
 }
 
 // ── Basic voice prompt (fallback when cache miss + enrichment timeout) ──
@@ -424,7 +338,7 @@ function describeState(s: SelfState): string {
   return parts.join(', ');
 }
 
-/** Strip SHIFT instruction blocks from enriched prompts so Claude doesn't output them in voice */
+/** Strip SHIFT instruction blocks from enriched prompts so the model doesn't output them in voice */
 function stripShiftInstruction(prompt: string): string {
   return prompt
     .replace(/After your response, on a new line, output[\s\S]*?Don't be timid with your shifts\./, '')
@@ -433,7 +347,7 @@ function stripShiftInstruction(prompt: string): string {
     .trim();
 }
 
-// ── OpenAI → Anthropic conversion ──
+// ── Message conversion (OpenAI → ChatMessage) ──
 
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant';
@@ -462,25 +376,20 @@ interface OpenAIChatRequest {
   [key: string]: unknown;
 }
 
-interface AnthropicMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-function convertOpenAIToAnthropic(messages: OpenAIMessage[]): {
+function convertMessages(messages: OpenAIMessage[]): {
   systemPrompt: string;
-  anthropicMessages: AnthropicMessage[];
+  chatMessages: ChatMessage[];
   lastUserMessage: string;
 } {
   const systemParts: string[] = [];
-  const anthropicMessages: AnthropicMessage[] = [];
+  const chatMessages: ChatMessage[] = [];
   let lastUserMessage = '';
 
   for (const msg of messages) {
     if (msg.role === 'system') {
       systemParts.push(msg.content);
     } else {
-      anthropicMessages.push({ role: msg.role, content: msg.content });
+      chatMessages.push({ role: msg.role, content: msg.content });
       if (msg.role === 'user') {
         lastUserMessage = msg.content;
       }
@@ -489,38 +398,9 @@ function convertOpenAIToAnthropic(messages: OpenAIMessage[]): {
 
   return {
     systemPrompt: systemParts.join('\n'),
-    anthropicMessages,
+    chatMessages,
     lastUserMessage,
   };
-}
-
-// ── Anthropic SSE parsing ──
-
-function parseAnthropicSSE(event: string): { isTextDelta: boolean; text: string | null } {
-  const lines = event.split('\n');
-  let eventType = '';
-  let dataStr = '';
-
-  for (const line of lines) {
-    if (line.startsWith('event: ')) {
-      eventType = line.slice(7).trim();
-    } else if (line.startsWith('data: ')) {
-      dataStr = line.slice(6);
-    }
-  }
-
-  if (eventType === 'content_block_delta' && dataStr) {
-    try {
-      const data = JSON.parse(dataStr);
-      if (data.delta?.type === 'text_delta' && typeof data.delta.text === 'string') {
-        return { isTextDelta: true, text: data.delta.text };
-      }
-    } catch {
-      // Parse error
-    }
-  }
-
-  return { isTextDelta: false, text: null };
 }
 
 // ── Helpers ──
@@ -529,12 +409,13 @@ async function writeFinishAndDone(
   writer: WritableStreamDefaultWriter<unknown>,
   encoder: TextEncoder,
   completionId: string,
+  modelName: string,
 ) {
   const finishChunk = {
     id: completionId,
     object: 'chat.completion.chunk',
     created: Math.floor(Date.now() / 1000),
-    model: DEFAULT_MODEL,
+    model: modelName,
     choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
   };
   await writer.write(encoder.encode(`data: ${JSON.stringify(finishChunk)}\n\n`));
@@ -546,6 +427,7 @@ async function writeErrorAndDone(
   writer: WritableStreamDefaultWriter<unknown>,
   encoder: TextEncoder,
   completionId: string,
+  modelName: string,
   msg = "I'm having a moment, give me a second.",
 ) {
   const now = Math.floor(Date.now() / 1000);
@@ -554,7 +436,7 @@ async function writeErrorAndDone(
     id: completionId,
     object: 'chat.completion.chunk',
     created: now,
-    model: DEFAULT_MODEL,
+    model: modelName,
     choices: [{ index: 0, delta: { content: msg }, finish_reason: null }],
   })}\n\n`));
   // Finish chunk + [DONE] sentinel — valid SSE stream closure
@@ -562,17 +444,11 @@ async function writeErrorAndDone(
     id: completionId,
     object: 'chat.completion.chunk',
     created: now,
-    model: DEFAULT_MODEL,
+    model: modelName,
     choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
   })}\n\n`));
   await writer.write(encoder.encode('data: [DONE]\n\n'));
   await writer.close();
-}
-
-function extractTextFromAnthropicResponse(body: Record<string, unknown>): string {
-  const content = body.content as Array<{ type: string; text?: string }>;
-  if (!content || !Array.isArray(content)) return '';
-  return content.filter(b => b.type === 'text' && b.text).map(b => b.text!).join('');
 }
 
 function generateId(): string {
